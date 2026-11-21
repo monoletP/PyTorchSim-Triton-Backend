@@ -213,7 +213,7 @@ def _stamp_apart(before, at, reason):
 
 def _plan(u):
     """What a dot's stream is but for its A, C and what follows C."""
-    return (u.M, u.K, u.rows, u.inputs, u.last_rows, u.k_rows, u.fmt, u.n_parts, u.k_parts)
+    return (u.M, u.K, u.rows, u.inputs, u.last_rows, u.k_rows, u.fmt, u.b_fmt, u.n_parts, u.k_parts)
 
 
 def _apart(before, op, ub, uo, dead):
@@ -491,11 +491,9 @@ def _tail(d, tile):
 def _refuse_formats(elt, acc_elt, b_elt):
     """Element types the unit has no format for: its words are f32, four int8, four fp8 or two bf16
     (formats 0 to 3), one per push, and its pops, int32 of an int8 dot and f32 of the rest, are added into C."""
-    if b_elt != elt:
+    if b_elt != elt and (_get_fp8_format(elt) is None or _get_fp8_format(b_elt) is None):
         raise NotImplementedError(
-            f"matmul operands A ({elt}) and B ({b_elt}) have "
-            f"different element types; every push is typed from A's element type at one sew, "
-            f"so B's elements would be read as A's")
+            f"mixed matmul operand types {elt} and {b_elt} require two supported FP8 formats")
     if isinstance(acc_elt, ir.BF16Type):
         raise NotImplementedError(
             f"a bf16 accumulator ({acc_elt}): the pop is added into C, and bf16 arithmetic "
@@ -523,10 +521,10 @@ def _prepare(op, lanes, vlen, queue, facts, regs, arrays=1, hoisted=()):
 
     A, B, C = op.operands[0], op.operands[1], op.operands[2]
     mtA, mtB, mtC = (ir.MemRefType(x.type) for x in (A, B, C))
-    elt, acc_elt = mtA.element_type, mtC.element_type
+    elt, b_elt, acc_elt = mtA.element_type, mtB.element_type, mtC.element_type
     M, N, K = mm.get_mnk(op)
     mm.refuse_batched(op)
-    _refuse_formats(elt, acc_elt, mtB.element_type)
+    _refuse_formats(elt, acc_elt, b_elt)
     mm.refuse_accumulator_in_its_loop(op)
     words = vlen // 32
     pack = _pack(elt)
@@ -540,7 +538,7 @@ def _prepare(op, lanes, vlen, queue, facts, regs, arrays=1, hoisted=()):
     n_live, k_live = facts.live
     # The last K tile computed is short only when it is K's own last tile.
     k_rows = _tail(K, lanes) if k_live == k_tiles else lanes
-    u = _Unit(lanes=lanes, regs=regs, words=words, rows=rows, pack=pack, fmt=_format(elt), M=M, K=K,
+    u = _Unit(lanes=lanes, regs=regs, words=words, rows=rows, pack=pack, fmt=_format(elt), b_fmt=_format(b_elt), M=M, K=K,
               vec=ir.VectorType.get([rows], elt), word=word_ty,
               acc=ir.VectorType.get([words], acc_elt), inputs=inputs,
               last_rows=_tail(M, rows), k_rows=k_rows, live=None)
@@ -800,7 +798,7 @@ def _build_dot(us, ip, n_parts, k_parts, inputs, lag, held=None):
 
     def staged(i, q):
         """What K pair `q` of N pair `i` stages: its tiles, their rows and its format."""
-        return (n_tile_of(i), n_upper_of(i), n_dual_of(i)) + k_pairs[q] + (u.fmt, u.K)
+        return (n_tile_of(i), n_upper_of(i), n_dual_of(i)) + k_pairs[q] + (u.b_fmt, u.K)
     reuse = held is not None and held == staged(0, 0)
 
     def plan(i, q):
@@ -1390,9 +1388,9 @@ def _push_pair(u, n_tile, k_at, n_upper, half, at, live, array=0):
     if u.regs > 1:
         upper = (_words(u, u.b, _at(n_tile, True, extent, k_at, 1, at), live) if n_upper
                  else u.zero)
-        _on(MxuPrepOp(upper, u.rvl, u.fmt, False), array)
+        _on(MxuPrepOp(upper, u.rvl, u.b_fmt, False), array)
     lower = _words(u, u.b, _at(n_tile, False, extent, k_at, 1, at), live)
-    _on(MxuPushOp(lower, u.rvl, u.fmt, half), array)
+    _on(MxuPushOp(lower, u.rvl, u.b_fmt, half), array)
 
 
 def _build_input(u, k_tile, m_idx, k_upper, k_rows, latch, m_rows, arrays=(0,)):
